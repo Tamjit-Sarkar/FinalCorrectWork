@@ -5,21 +5,55 @@ from datetime import datetime, date
 from typing import Optional
 import os
 import secrets
+import hashlib
 
 app = FastAPI()
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "taskflow2024")
-sessions: set = set()
+# Users loaded from env var USERS in format: "alice:pass1,bob:pass2"
+# Falls back to a default admin account if not set
+
+def _load_users() -> dict:
+    raw = os.environ.get("USERS", "admin:taskflow2024")
+    users = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            username, password = entry.split(":", 1)
+            users[username.strip().lower()] = password.strip()
+    return users
+
+# { username -> hashed_password } loaded at startup
+_RAW_USERS = _load_users()
+USERS: dict = {u: hashlib.sha256(p.encode()).hexdigest() for u, p in _RAW_USERS.items()}
+
+# { session_token -> username }
+sessions: dict = {}
+
+
+def get_current_user(session: Optional[str]) -> Optional[str]:
+    if session is None:
+        return None
+    return sessions.get(session)
 
 
 def is_authenticated(session: Optional[str]) -> bool:
-    return session is not None and session in sessions
+    return get_current_user(session) is not None
 
 
-# ─── Data ────────────────────────────────────────────────────────────────────
-tasks: list = []
+def check_credentials(username: str, password: str) -> bool:
+    h = hashlib.sha256(password.encode()).hexdigest()
+    return USERS.get(username.lower()) == h
+
+
+# ─── Data (per-user tasks) ────────────────────────────────────────────────────
+# { username -> list of task dicts }
+user_tasks: dict = {}
 next_task_id: int = 1
+
+
+def get_tasks(username: str) -> list:
+    return user_tasks.setdefault(username, [])
 
 
 class Task(BaseModel):
@@ -327,11 +361,15 @@ def landing():
 <section class="login-section" id="login">
   <div class="login-card">
     <h2>Welcome back</h2>
-    <p>Enter your password to access the dashboard.</p>
+    <p>Sign in to access your personal dashboard.</p>
     <form method="POST" action="/login">
       <div class="field">
+        <label>Username</label>
+        <input type="text" name="username" placeholder="Enter username" autofocus required autocomplete="username" />
+      </div>
+      <div class="field">
         <label>Password</label>
-        <input type="password" name="password" placeholder="Enter password" autofocus required />
+        <input type="password" name="password" placeholder="Enter password" required autocomplete="current-password" />
       </div>
       <button type="submit" class="login-btn">Access dashboard →</button>
     </form>
@@ -375,12 +413,14 @@ def login_error():
 </head>
 <body>
 <div class="card">
-  <h2>Incorrect password</h2>
-  <p>That password didn't match. Please try again.</p>
-  <div class="error">⚠ Invalid password</div>
+  <h2>Incorrect credentials</h2>
+  <p>Username or password didn't match. Please try again.</p>
+  <div class="error">⚠️ Invalid username or password</div>
   <form method="POST" action="/login">
+    <label>Username</label>
+    <input type="text" name="username" placeholder="Enter username" autofocus required autocomplete="username" style="margin-bottom:12px" />
     <label>Password</label>
-    <input type="password" name="password" placeholder="Enter password" autofocus required />
+    <input type="password" name="password" placeholder="Enter password" required autocomplete="current-password" />
     <button type="submit">Try again →</button>
   </form>
   <a href="/" class="back">← Back to home</a>
@@ -391,10 +431,10 @@ def login_error():
 
 # ─── Auth Routes ──────────────────────────────────────────────────────────────
 @app.post("/login")
-def login(response: Response, password: str = Form(...)):
-    if password == APP_PASSWORD:
+def login(username: str = Form(...), password: str = Form(...)):
+    if check_credentials(username, password):
         token = secrets.token_hex(32)
-        sessions.add(token)
+        sessions[token] = username.lower()
         resp = RedirectResponse("/dashboard", status_code=302)
         resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
         return resp
@@ -402,9 +442,9 @@ def login(response: Response, password: str = Form(...)):
 
 
 @app.get("/logout")
-def logout(response: Response, session: Optional[str] = Cookie(default=None)):
+def logout(session: Optional[str] = Cookie(default=None)):
     if session and session in sessions:
-        sessions.discard(session)
+        del sessions[session]
     resp = RedirectResponse("/", status_code=302)
     resp.delete_cookie("session")
     return resp
@@ -413,9 +453,11 @@ def logout(response: Response, session: Optional[str] = Cookie(default=None)):
 # ─── Dashboard ────────────────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(session: Optional[str] = Cookie(default=None)):
-    if not is_authenticated(session):
+    username = get_current_user(session)
+    if not username:
         return RedirectResponse("/", status_code=302)
 
+    tasks = get_tasks(username)
     total = len(tasks)
     completed = len([t for t in tasks if t["completed"]])
     pending = total - completed
@@ -660,6 +702,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 <div class="topbar">
   <div class="topbar-logo">TASK<span>FLOW</span></div>
   <div class="topbar-right">
+    <span class="topbar-date">👤 {username}</span>
     <span class="topbar-date">{date.today().strftime('%B %d, %Y')}</span>
     <a href="/logout" class="logout">Sign out</a>
   </div>
@@ -669,7 +712,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 
   <div>
     <div class="page-header">
-      <h1>Your Dashboard</h1>
+      <h1>Hey, {username.capitalize()} 👋</h1>
       <p>Stay on top of every commitment.</p>
     </div>
 
@@ -807,9 +850,10 @@ def task_add(
     priority: str = Form(...), task_type: str = Form(...), due_date: str = Form(...),
 ):
     global next_task_id
-    if not is_authenticated(session):
+    username = get_current_user(session)
+    if not username:
         return RedirectResponse("/", status_code=302)
-    tasks.append({
+    get_tasks(username).append({
         "id": next_task_id, "title": title, "category": category,
         "priority": priority, "due_date": due_date,
         "task_type": task_type, "completed": False,
@@ -820,9 +864,10 @@ def task_add(
 
 @app.get("/task/complete/{task_id}")
 def task_complete(task_id: int, session: Optional[str] = Cookie(default=None)):
-    if not is_authenticated(session):
+    username = get_current_user(session)
+    if not username:
         return RedirectResponse("/", status_code=302)
-    for t in tasks:
+    for t in get_tasks(username):
         if t["id"] == task_id:
             t["completed"] = not t["completed"]
             break
@@ -836,9 +881,10 @@ def task_edit(
     title: str = Form(...), category: str = Form(...),
     priority: str = Form(...), due_date: str = Form(...), task_type: str = Form(...),
 ):
-    if not is_authenticated(session):
+    username = get_current_user(session)
+    if not username:
         return RedirectResponse("/", status_code=302)
-    for t in tasks:
+    for t in get_tasks(username):
         if t["id"] == task_id:
             t.update(title=title, category=category, priority=priority,
                      due_date=due_date, task_type=task_type)
@@ -848,8 +894,8 @@ def task_edit(
 
 @app.get("/task/delete/{task_id}")
 def task_delete(task_id: int, session: Optional[str] = Cookie(default=None)):
-    global tasks
-    if not is_authenticated(session):
+    username = get_current_user(session)
+    if not username:
         return RedirectResponse("/", status_code=302)
-    tasks = [t for t in tasks if t["id"] != task_id]
+    user_tasks[username] = [t for t in get_tasks(username) if t["id"] != task_id]
     return RedirectResponse("/dashboard", status_code=302)
