@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Form, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 import secrets
 import hashlib
@@ -8,15 +8,9 @@ import hashlib
 app = FastAPI()
 
 # ─── Data Storage ─────────────────────────────────────────────────────────────
-# { username -> hashed_password }
 registered_users: dict = {}
-
-# { session_token -> username }
 sessions: dict = {}
-
-# { username -> list of task dicts }
 user_tasks: dict = {}
-
 next_task_id: int = 1
 
 
@@ -89,7 +83,6 @@ def landing():
     --gray-2: #2c2c2e;
     --gray-3: #48484a;
     --gray-5: #aeaeb2;
-    --gray-6: #d1d1d6;
   }
 
   html { scroll-behavior: smooth; }
@@ -294,12 +287,6 @@ def landing():
   }
   .toggle-auth a:hover { text-decoration: underline; }
 
-  .error-msg {
-    background: rgba(230,57,70,0.12); border: 1px solid rgba(230,57,70,0.3);
-    border-radius: 8px; padding: 12px 16px;
-    color: #ff6b78; font-size: 13px; margin-bottom: 20px;
-  }
-
   footer {
     border-top: 1px solid rgba(255,255,255,0.06);
     padding: 32px 48px;
@@ -332,7 +319,6 @@ def landing():
   </div>
 </nav>
 
-<!-- HERO -->
 <section class="hero">
   <div class="hero-content">
     <div class="hero-eyebrow"><span class="dot"></span> Your personal task OS</div>
@@ -345,7 +331,6 @@ def landing():
   </div>
 </section>
 
-<!-- FEATURES -->
 <section class="features" id="features">
   <div class="section-label">Why Taskflow</div>
   <div class="section-title">Everything you need.<br>Nothing you don't.</div>
@@ -357,8 +342,8 @@ def landing():
     </div>
     <div class="feature">
       <div class="feature-icon">⏱️</div>
-      <h3>Deadline tracking</h3>
-      <p>Color-coded deadlines show you what's overdue, urgent, or safely scheduled — at a glance.</p>
+      <h3>Time tracking</h3>
+      <p>Set exact due dates and times. Color-coded deadlines show urgency at a glance.</p>
     </div>
     <div class="feature">
       <div class="feature-icon">📊</div>
@@ -368,7 +353,6 @@ def landing():
   </div>
 </section>
 
-<!-- SIGNUP SECTION -->
 <section class="auth-section" id="signup">
   <div class="auth-card">
     <h2>Create account</h2>
@@ -390,7 +374,6 @@ def landing():
   </div>
 </section>
 
-<!-- SIGNIN SECTION -->
 <section class="auth-section" id="signin">
   <div class="auth-card">
     <h2>Welcome back</h2>
@@ -425,23 +408,18 @@ def landing():
 @app.post("/register")
 def register(username: str = Form(...), password: str = Form(...)):
     """Create a new user account"""
-    # Validate input
     valid, error = validate_credentials(username, password)
     if not valid:
         return RedirectResponse(f"/?error={error}", status_code=302)
     
-    # Check if username already exists
     if username_exists(username):
         return RedirectResponse("/?error=Username%20already%20taken", status_code=302)
     
-    # Register new user
     registered_users[username.lower()] = hash_password(password)
     
-    # Create session
     token = secrets.token_hex(32)
     sessions[token] = username.lower()
     
-    # Redirect to dashboard with session cookie
     resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
     return resp
@@ -450,15 +428,12 @@ def register(username: str = Form(...), password: str = Form(...)):
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     """Login with existing credentials"""
-    # Check if user exists and password is correct
     if not username_exists(username) or not check_password(username, password):
         return RedirectResponse("/?error=Invalid%20username%20or%20password", status_code=302)
     
-    # Create session
     token = secrets.token_hex(32)
     sessions[token] = username.lower()
     
-    # Redirect to dashboard with session cookie
     resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
     return resp
@@ -477,7 +452,7 @@ def logout(session: Optional[str] = Cookie(default=None)):
 # ─── Dashboard ────────────────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(session: Optional[str] = Cookie(default=None)):
-    """Main dashboard view"""
+    """Main dashboard view with dark/light theme support"""
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
@@ -488,7 +463,6 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
     pending = total - completed
     progress = int((completed / total * 100) if total else 0)
 
-    # Determine progress ring color
     if progress == 0:
         ring_color = "#6b7280"
     elif progress < 33:
@@ -498,22 +472,22 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
     else:
         ring_color = "#10b981"
 
-    # Render tasks
     tasks_html = ""
     for t in tasks:
         try:
-            due = datetime.strptime(t["due_date"], "%Y-%m-%d").date()
-            days_left = (due - date.today()).days
+            due_dt = datetime.strptime(t["due_date"], "%Y-%m-%dT%H:%M")
+            days_left = (due_dt.date() - date.today()).days
+            due_display = due_dt.strftime("%b %d · %I:%M %p")
         except:
             days_left = 0
+            due_display = t["due_date"]
 
-        # Determine status
         if t["completed"]:
             status = "Completed"
             status_class = "completed"
         elif days_left < 0:
             n = abs(days_left)
-            status = f"Overdue by {n} day" + ("s" if n != 1 else "")
+            status = f"Overdue by {n}d"
             status_class = "overdue"
         elif days_left == 0:
             status = "Due today"
@@ -522,17 +496,15 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
             status = "Due tomorrow"
             status_class = "upcoming"
         else:
-            status = f"{days_left} days left"
+            status = f"{days_left}d left"
             status_class = "normal"
 
-        # Priority colors
         priority = t["priority"].lower()
         priority_colors = {"high": "#dc2626", "medium": "#f59e0b", "low": "#10b981"}
         priority_bg = {"high": "#fee2e2", "medium": "#fef3c7", "low": "#ecfdf5"}
         color = priority_colors.get(priority, "#666")
         bg = priority_bg.get(priority, "white")
 
-        # Escape HTML in strings
         title_esc = t["title"].replace('"', '&quot;').replace("'", "&#39;")
         cat_esc = t["category"].replace('"', '&quot;').replace("'", "&#39;")
 
@@ -542,7 +514,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
             </a>
             <div class="task-main">
                 <h3>{t['title']}</h3>
-                <p class="task-meta">{t['category']} · {t['task_type']} · {t['due_date']}</p>
+                <p class="task-meta">{t['category']} · {t['task_type']} · {due_display}</p>
             </div>
             <span class="badge" style="background:{color}22;color:{color};border:1px solid {color}44">{priority.upper()}</span>
             <span class="status-label">{status}</span>
@@ -561,26 +533,80 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
 <style>
+  :root {{
+    /* Dark theme (navy) */
+    --bg-primary: #0f1419;
+    --bg-secondary: #1a1f2e;
+    --bg-tertiary: #232a3e;
+    --text-primary: #f8fafb;
+    --text-secondary: #b0b9c6;
+    --text-tertiary: #8892a1;
+    --border: rgba(255, 255, 255, 0.08);
+    --accent: #e63946;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --danger: #dc2626;
+  }}
+
+  html[data-theme="light"] {{
+    --bg-primary: #fefdfb;
+    --bg-secondary: #f8f6f0;
+    --bg-tertiary: #f0ede4;
+    --text-primary: #2d2620;
+    --text-secondary: #6b6159;
+    --text-tertiary: #8b7d72;
+    --border: rgba(45, 38, 32, 0.08);
+    --accent: #d84c4c;
+    --success: #059669;
+    --warning: #d97706;
+    --danger: #b91c1c;
+  }}
+
   *, *::before, *::after {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ font-family:'Inter',sans-serif; background:#f5f4f2; color:#1a1a1a; }}
+  body {{
+    font-family:'Inter',sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    transition: background 0.3s, color 0.3s;
+  }}
 
   .topbar {{
     position:fixed; top:0; left:0; right:0; z-index:100;
-    background:#0a0a0a; padding:0 32px;
+    background: var(--bg-secondary);
+    padding:0 32px;
     display:flex; align-items:center; justify-content:space-between;
-    height:56px; border-bottom:1px solid rgba(255,255,255,0.06);
+    height:56px; border-bottom:1px solid var(--border);
+    backdrop-filter: blur(8px);
+    transition: background 0.3s;
   }}
-  .topbar-logo {{ font-weight:700; font-size:16px; color:#fafaf9; }}
-  .topbar-logo span {{ color:#e63946; }}
+  .topbar-logo {{ font-weight:700; font-size:16px; color:var(--text-primary); }}
+  .topbar-logo span {{ color:var(--accent); }}
   .topbar-right {{ display:flex; align-items:center; gap:16px; }}
-  .topbar-info {{ font-size:13px; color:#6b7280; }}
+  .topbar-info {{ font-size:13px; color:var(--text-secondary); }}
+  
+  .theme-toggle {{
+    width:40px; height:40px; border-radius:8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    transition: all 0.2s;
+  }}
+  .theme-toggle:hover {{
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }}
+  
   .logout {{
     padding:7px 16px; border-radius:7px;
-    border:1px solid rgba(255,255,255,0.12); color:#aeaeb2;
+    border:1px solid var(--border); color:var(--text-secondary);
     font-size:12px; font-weight:500; text-decoration:none;
     transition:all 0.2s;
   }}
-  .logout:hover {{ border-color:rgba(255,255,255,0.3); color:#fafaf9; }}
+  .logout:hover {{ border-color:var(--text-primary); color:var(--text-primary); }}
 
   .page {{ max-width:1200px; margin:0 auto; padding:80px 32px 60px; display:grid; grid-template-columns:1fr 280px; gap:40px; }}
 
@@ -588,31 +614,35 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   .page-header h1 {{
     font-family:'Playfair Display',serif;
     font-size:36px; font-weight:700; letter-spacing:-0.5px;
-    margin-bottom:6px;
+    margin-bottom:6px; color: var(--text-primary);
   }}
-  .page-header p {{ font-size:14px; color:#6b7280; }}
+  .page-header p {{ font-size:14px; color:var(--text-secondary); }}
 
   .form-card {{
-    grid-column:1; background:white; padding:28px 32px;
+    grid-column:1; background:var(--bg-secondary); padding:28px 32px;
     border-radius:14px; margin-bottom:32px;
+    border: 1px solid var(--border);
     box-shadow:0 1px 3px rgba(0,0,0,0.05);
+    transition: background 0.3s;
   }}
-  .form-card-title {{ font-size:13px; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:20px; }}
+  .form-card-title {{ font-size:13px; font-weight:600; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.6px; margin-bottom:20px; }}
   .form-grid {{ display:grid; gap:12px; }}
   .form-row {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
   .form-full {{ grid-column:1/-1; }}
-  input[type=text], input[type=date], select {{
+  input[type=text], input[type=datetime-local], select {{
     width:100%; padding:10px 14px;
-    border:1px solid #e5e7eb; border-radius:8px;
-    font-size:14px; font-family:'Inter',sans-serif; color:#1a1a1a;
-    background:white; transition:border-color 0.2s;
+    border:1px solid var(--border); border-radius:8px;
+    font-size:14px; font-family:'Inter',sans-serif;
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    transition:border-color 0.2s, background 0.3s;
   }}
-  input[type=text]:focus, input[type=date]:focus, select:focus {{
-    outline:none; border-color:#1a1a1a;
-    box-shadow:0 0 0 3px rgba(26,26,26,0.05);
+  input[type=text]:focus, input[type=datetime-local]:focus, select:focus {{
+    outline:none; border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(230,57,70,0.1);
   }}
   .btn-add {{
-    width:100%; padding:11px; background:#0a0a0a; color:white;
+    width:100%; padding:11px; background:var(--accent); color:white;
     border:none; border-radius:8px; font-weight:600; font-size:14px;
     cursor:pointer; transition:opacity 0.2s;
   }}
@@ -620,71 +650,72 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 
   .tasks-list {{ grid-column:1; display:flex; flex-direction:column; gap:10px; }}
   .tasks-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; }}
-  .tasks-header h2 {{ font-size:15px; font-weight:600; }}
-  .tasks-count {{ font-size:12px; color:#6b7280; }}
+  .tasks-header h2 {{ font-size:15px; font-weight:600; color: var(--text-primary); }}
+  .tasks-count {{ font-size:12px; color:var(--text-secondary); }}
 
   .task-item {{
-    background:white; padding:16px 20px; border-radius:12px;
+    background:var(--bg-secondary); padding:16px 20px; border-radius:12px;
     display:grid; grid-template-columns:28px 1fr 80px 130px auto;
     gap:14px; align-items:center;
-    box-shadow:0 1px 3px rgba(0,0,0,0.05);
-    border-left:3px solid #e5e7eb;
+    border-left:3px solid var(--border);
     transition:all 0.15s;
   }}
-  .task-item:hover {{ transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,0.08); }}
-  .task-item.completed {{ opacity:0.55; }}
-  .task-item.completed h3 {{ text-decoration:line-through; color:#6b7280; }}
-  .task-item.urgent {{ border-left-color:#e63946; }}
-  .task-item.overdue {{ border-left-color:#e63946; }}
-  .task-item.upcoming {{ border-left-color:#f59e0b; }}
+  .task-item:hover {{ transform:translateY(-1px); border-left-color: var(--accent); }}
+  .task-item.completed {{ opacity:0.5; }}
+  .task-item.completed h3 {{ text-decoration:line-through; color:var(--text-tertiary); }}
+  .task-item.urgent {{ border-left-color:var(--danger); }}
+  .task-item.overdue {{ border-left-color:var(--danger); }}
+  .task-item.upcoming {{ border-left-color:var(--warning); }}
 
   .checkbox {{
-    width:22px; height:22px; border:2px solid #d1d5db;
+    width:22px; height:22px; border:2px solid var(--border);
     border-radius:6px; display:flex; align-items:center; justify-content:center;
     cursor:pointer; text-decoration:none; color:white;
     font-size:11px; font-weight:700; transition:all 0.15s;
   }}
-  .checkbox:hover:not(.checked) {{ border-color:#1a1a1a; }}
-  .checkbox.checked {{ background:#10b981; border-color:#10b981; }}
+  .checkbox:hover:not(.checked) {{ border-color:var(--text-primary); }}
+  .checkbox.checked {{ background:var(--success); border-color:var(--success); }}
 
-  .task-main h3 {{ font-size:14px; font-weight:500; margin-bottom:4px; }}
-  .task-meta {{ font-size:11px; color:#9ca3af; }}
+  .task-main h3 {{ font-size:14px; font-weight:500; margin-bottom:4px; color: var(--text-primary); }}
+  .task-meta {{ font-size:11px; color:var(--text-tertiary); }}
   .badge {{ padding:3px 9px; border-radius:5px; font-size:11px; font-weight:600; white-space:nowrap; }}
-  .status-label {{ font-size:11px; font-weight:600; color:#6b7280; }}
+  .status-label {{ font-size:11px; font-weight:600; color:var(--text-secondary); }}
   .actions {{ display:flex; gap:6px; }}
   .edit-btn, .delete-btn {{
     padding:5px 10px; border-radius:6px; font-size:11px;
     font-weight:600; border:none; cursor:pointer;
     text-decoration:none; transition:all 0.15s;
   }}
-  .edit-btn {{ background:#f3f4f6; color:#374151; }}
-  .edit-btn:hover {{ background:#e5e7eb; }}
-  .delete-btn {{ background:#fef2f2; color:#dc2626; }}
-  .delete-btn:hover {{ background:#fee2e2; }}
+  .edit-btn {{ background:var(--bg-tertiary); color:var(--text-primary); }}
+  .edit-btn:hover {{ background: var(--border); }}
+  .delete-btn {{ background: rgba(220,38,38,0.15); color:var(--danger); }}
+  .delete-btn:hover {{ background: rgba(220,38,38,0.25); }}
 
   .empty-state {{
     grid-column:1; text-align:center; padding:60px 20px;
-    background:white; border-radius:14px;
-    box-shadow:0 1px 3px rgba(0,0,0,0.05);
+    background:var(--bg-secondary); border-radius:14px;
+    border: 1px solid var(--border);
   }}
   .empty-icon {{ font-size:40px; margin-bottom:16px; }}
-  .empty-state h3 {{ font-size:16px; font-weight:600; margin-bottom:8px; }}
-  .empty-state p {{ font-size:13px; color:#6b7280; }}
+  .empty-state h3 {{ font-size:16px; font-weight:600; margin-bottom:8px; color: var(--text-primary); }}
+  .empty-state p {{ font-size:13px; color:var(--text-secondary); }}
 
   .sidebar {{ position:sticky; top:72px; height:fit-content; display:flex; flex-direction:column; gap:14px; }}
   .stat-card {{
-    background:white; padding:20px 24px; border-radius:14px;
-    box-shadow:0 1px 3px rgba(0,0,0,0.05); text-align:center;
+    background:var(--bg-secondary); padding:20px 24px; border-radius:14px;
+    border: 1px solid var(--border);
+    text-align:center;
   }}
-  .stat-label {{ font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:#9ca3af; margin-bottom:6px; }}
-  .stat-num {{ font-size:40px; font-weight:300; color:#0a0a0a; line-height:1; }}
+  .stat-label {{ font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary); margin-bottom:6px; }}
+  .stat-num {{ font-size:40px; font-weight:300; color:var(--text-primary); line-height:1; }}
   .progress-card {{
-    background:white; padding:24px; border-radius:14px;
-    box-shadow:0 1px 3px rgba(0,0,0,0.05); text-align:center;
+    background:var(--bg-secondary); padding:24px; border-radius:14px;
+    border: 1px solid var(--border);
+    text-align:center;
   }}
   .ring-wrap {{ width:96px; height:96px; margin:0 auto 12px; }}
   .ring-wrap svg {{ width:100%; height:100%; transform:rotate(-90deg); }}
-  .ring-bg {{ fill:none; stroke:#f3f4f6; stroke-width:7; }}
+  .ring-bg {{ fill:none; stroke:var(--border); stroke-width:7; }}
   .ring-fill {{
     fill:none; stroke:{ring_color}; stroke-width:7; stroke-linecap:round;
     stroke-dasharray:282; stroke-dashoffset:{282 - (progress/100*282):.1f};
@@ -694,22 +725,23 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 
   .modal {{
     display:none; position:fixed; inset:0;
-    background:rgba(0,0,0,0.4); z-index:999;
+    background:rgba(0,0,0,0.5); z-index:999;
     align-items:center; justify-content:center;
     backdrop-filter:blur(4px);
   }}
   .modal.active {{ display:flex; }}
   .modal-box {{
-    background:white; padding:36px; border-radius:16px;
+    background:var(--bg-secondary); padding:36px; border-radius:16px;
     width:90%; max-width:420px;
+    border: 1px solid var(--border);
     box-shadow:0 24px 64px rgba(0,0,0,0.2);
   }}
-  .modal-box h2 {{ font-size:18px; font-weight:700; margin-bottom:20px; }}
+  .modal-box h2 {{ font-size:18px; font-weight:700; margin-bottom:20px; color: var(--text-primary); }}
   .modal-form {{ display:grid; gap:11px; }}
   .modal-actions {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:20px; }}
   .modal-btn {{ padding:11px; border-radius:8px; border:none; font-weight:600; cursor:pointer; font-size:14px; }}
-  .cancel-btn {{ background:#f3f4f6; color:#374151; }}
-  .save-btn {{ background:#0a0a0a; color:white; }}
+  .cancel-btn {{ background:var(--bg-tertiary); color:var(--text-primary); }}
+  .save-btn {{ background:var(--accent); color:white; }}
 
   @media(max-width:900px) {{
     .page {{ grid-template-columns:1fr; }}
@@ -726,6 +758,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   <div class="topbar-right">
     <span class="topbar-info">👤 {username}</span>
     <span class="topbar-info">{date.today().strftime('%b %d, %Y')}</span>
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌙</button>
     <a href="/logout" class="logout">Sign out</a>
   </div>
 </div>
@@ -746,7 +779,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
           </div>
           <div class="form-row">
             <input type="text" name="category" placeholder="Category" required />
-            <input type="date" name="due_date" required />
+            <input type="datetime-local" name="due_date" required />
           </div>
           <div class="form-row">
             <select name="priority" required>
@@ -815,7 +848,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
       <div class="modal-form">
         <input type="text" id="editTitle" name="title" placeholder="Title" required />
         <input type="text" id="editCategory" name="category" placeholder="Category" required />
-        <input type="date" id="editDueDate" name="due_date" required />
+        <input type="datetime-local" id="editDueDate" name="due_date" required />
         <select id="editPriority" name="priority" required>
           <option value="High">High</option>
           <option value="Medium">Medium</option>
@@ -835,6 +868,30 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 </div>
 
 <script>
+  // Theme toggle
+  function toggleTheme() {{
+    const html = document.documentElement;
+    const currentTheme = html.getAttribute('data-theme') || 'dark';
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', newTheme);
+    localStorage.setItem('theme', newTheme);
+    updateThemeIcon();
+  }}
+
+  function updateThemeIcon() {{
+    const theme = document.documentElement.getAttribute('data-theme') || 'dark';
+    const btn = document.querySelector('.theme-toggle');
+    btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+  }}
+
+  // Load saved theme on page load
+  document.addEventListener('DOMContentLoaded', () => {{
+    const saved = localStorage.getItem('theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', saved);
+    updateThemeIcon();
+  }});
+
+  // Modal functions
   function openEdit(id, title, category, priority, dueDate, taskType) {{
     document.getElementById('editTitle').value = title;
     document.getElementById('editCategory').value = category;
@@ -844,9 +901,11 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
     document.getElementById('editForm').action = '/task/edit/' + id;
     document.getElementById('editModal').classList.add('active');
   }}
+
   function closeEdit() {{
     document.getElementById('editModal').classList.remove('active');
   }}
+
   window.onclick = e => {{
     if (e.target === document.getElementById('editModal')) closeEdit();
   }}
