@@ -1,70 +1,72 @@
-from fastapi import FastAPI, Form, Request, Response, Cookie
+from fastapi import FastAPI, Form, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel
 from datetime import datetime, date
 from typing import Optional
-import os
 import secrets
 import hashlib
 
 app = FastAPI()
 
-# ─── Auth ────────────────────────────────────────────────────────────────────
-# Users loaded from env var USERS in format: "alice:pass1,bob:pass2"
-# Falls back to a default admin account if not set
-
-def _load_users() -> dict:
-    raw = os.environ.get("USERS", "admin:taskflow2024")
-    users = {}
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if ":" in entry:
-            username, password = entry.split(":", 1)
-            users[username.strip().lower()] = password.strip()
-    return users
-
-# { username -> hashed_password } loaded at startup
-_RAW_USERS = _load_users()
-USERS: dict = {u: hashlib.sha256(p.encode()).hexdigest() for u, p in _RAW_USERS.items()}
+# ─── Data Storage ─────────────────────────────────────────────────────────────
+# { username -> hashed_password }
+registered_users: dict = {}
 
 # { session_token -> username }
 sessions: dict = {}
 
+# { username -> list of task dicts }
+user_tasks: dict = {}
+
+next_task_id: int = 1
+
+
+# ─── Auth Helpers ─────────────────────────────────────────────────────────────
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
 
 def get_current_user(session: Optional[str]) -> Optional[str]:
+    """Get username from session token"""
     if session is None:
         return None
     return sessions.get(session)
 
 
 def is_authenticated(session: Optional[str]) -> bool:
+    """Check if session is valid"""
     return get_current_user(session) is not None
 
 
-def check_credentials(username: str, password: str) -> bool:
-    h = hashlib.sha256(password.encode()).hexdigest()
-    return USERS.get(username.lower()) == h
+def username_exists(username: str) -> bool:
+    """Check if username is already registered"""
+    return username.lower() in registered_users
 
 
-# ─── Data (per-user tasks) ────────────────────────────────────────────────────
-# { username -> list of task dicts }
-user_tasks: dict = {}
-next_task_id: int = 1
+def validate_credentials(username: str, password: str) -> tuple[bool, str]:
+    """Validate username and password format"""
+    if not username or len(username) < 2:
+        return False, "Username must be at least 2 characters"
+    if not password or len(password) < 3:
+        return False, "Password must be at least 3 characters"
+    if " " in username:
+        return False, "Username cannot contain spaces"
+    return True, ""
+
+
+def check_password(username: str, password: str) -> bool:
+    """Verify password against stored hash"""
+    if username.lower() not in registered_users:
+        return False
+    h = hash_password(password)
+    return registered_users[username.lower()] == h
 
 
 def get_tasks(username: str) -> list:
-    return user_tasks.setdefault(username, [])
+    """Get tasks for a user"""
+    return user_tasks.setdefault(username.lower(), [])
 
 
-class Task(BaseModel):
-    title: str
-    category: str
-    priority: str
-    due_date: str
-    task_type: str
-
-
-# ─── Landing Page ─────────────────────────────────────────────────────────────
+# ─── Landing / Home Page ──────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def landing():
     return """<!DOCTYPE html>
@@ -88,7 +90,6 @@ def landing():
     --gray-3: #48484a;
     --gray-5: #aeaeb2;
     --gray-6: #d1d1d6;
-    --gray-7: #f2f2f7;
   }
 
   html { scroll-behavior: smooth; }
@@ -101,7 +102,6 @@ def landing():
     overflow-x: hidden;
   }
 
-  /* ── NAV ── */
   nav {
     position: fixed; top: 0; left: 0; right: 0; z-index: 100;
     display: flex; align-items: center; justify-content: space-between;
@@ -115,6 +115,7 @@ def landing():
     color: var(--white);
   }
   .nav-logo span { color: var(--red); }
+  .nav-actions { display: flex; gap: 12px; }
   .nav-cta {
     padding: 9px 22px; border-radius: 8px;
     background: var(--red); color: white;
@@ -122,8 +123,11 @@ def landing():
     text-decoration: none; transition: background 0.2s;
   }
   .nav-cta:hover { background: var(--red-dark); }
+  .nav-cta.secondary {
+    background: transparent; border: 1px solid rgba(255,255,255,0.2);
+  }
+  .nav-cta.secondary:hover { border-color: rgba(255,255,255,0.4); }
 
-  /* ── HERO ── */
   .hero {
     min-height: 100vh;
     display: flex; align-items: center; justify-content: center;
@@ -133,7 +137,6 @@ def landing():
     overflow: hidden;
   }
 
-  /* Subtle grid background */
   .hero::before {
     content: '';
     position: absolute; inset: 0;
@@ -144,7 +147,6 @@ def landing():
     mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 40%, transparent 100%);
   }
 
-  /* Red glow blob */
   .hero::after {
     content: '';
     position: absolute;
@@ -177,9 +179,7 @@ def landing():
     margin-bottom: 24px;
     color: var(--white);
   }
-  .hero h1 em {
-    font-style: italic; color: var(--red);
-  }
+  .hero h1 em { font-style: italic; color: var(--red); }
 
   .hero-sub {
     font-size: 18px; font-weight: 300; line-height: 1.7;
@@ -206,7 +206,6 @@ def landing():
   }
   .btn-ghost:hover { border-color: rgba(255,255,255,0.3); color: var(--white); }
 
-  /* ── FEATURES ── */
   .features {
     padding: 120px 48px;
     max-width: 1100px; margin: 0 auto;
@@ -243,12 +242,11 @@ def landing():
   .feature h3 { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
   .feature p { font-size: 14px; line-height: 1.7; color: var(--gray-5); }
 
-  /* ── LOGIN ── */
-  .login-section {
+  .auth-section {
     padding: 120px 24px;
     display: flex; align-items: center; justify-content: center;
   }
-  .login-card {
+  .auth-card {
     background: var(--gray-1);
     border: 1px solid rgba(255,255,255,0.06);
     border-radius: 20px;
@@ -256,13 +254,13 @@ def landing():
     width: 100%; max-width: 420px;
     box-shadow: 0 40px 80px rgba(0,0,0,0.4);
   }
-  .login-card h2 {
+  .auth-card h2 {
     font-family: 'Playfair Display', serif;
     font-size: 28px; font-weight: 700;
     margin-bottom: 8px;
   }
-  .login-card p {
-    font-size: 14px; color: var(--gray-5); margin-bottom: 36px;
+  .auth-card p {
+    font-size: 14px; color: var(--gray-5); margin-bottom: 24px;
   }
   .field { margin-bottom: 16px; }
   .field label {
@@ -279,20 +277,29 @@ def landing():
   }
   .field input:focus { outline: none; border-color: var(--red); }
   .field input::placeholder { color: var(--gray-3); }
-  .login-btn {
+
+  .auth-btn {
     width: 100%; padding: 14px;
     background: var(--red); border: none; border-radius: 10px;
     color: white; font-size: 15px; font-weight: 600;
     cursor: pointer; margin-top: 8px; transition: all 0.2s;
   }
-  .login-btn:hover { background: var(--red-dark); }
+  .auth-btn:hover { background: var(--red-dark); }
+
+  .toggle-auth {
+    text-align: center; margin-top: 20px; font-size: 13px; color: var(--gray-5);
+  }
+  .toggle-auth a {
+    color: var(--red); text-decoration: none; font-weight: 600;
+  }
+  .toggle-auth a:hover { text-decoration: underline; }
+
   .error-msg {
     background: rgba(230,57,70,0.12); border: 1px solid rgba(230,57,70,0.3);
     border-radius: 8px; padding: 12px 16px;
     color: #ff6b78; font-size: 13px; margin-bottom: 20px;
   }
 
-  /* ── FOOTER ── */
   footer {
     border-top: 1px solid rgba(255,255,255,0.06);
     padding: 32px 48px;
@@ -302,14 +309,15 @@ def landing():
   .footer-logo { font-weight: 700; color: var(--gray-5); }
   .footer-logo span { color: var(--red); }
 
-  /* ── RESPONSIVE ── */
   @media (max-width: 768px) {
     nav { padding: 16px 20px; }
+    .nav-actions { gap: 8px; }
+    .nav-cta { padding: 8px 16px; font-size: 12px; }
     .features { padding: 80px 20px; }
     .features-grid { grid-template-columns: 1fr; gap: 2px; }
     .feature:first-child { border-radius: 12px 12px 0 0; }
     .feature:last-child { border-radius: 0 0 12px 12px; }
-    .login-card { padding: 36px 24px; }
+    .auth-card { padding: 36px 24px; }
     footer { flex-direction: column; gap: 8px; text-align: center; }
   }
 </style>
@@ -318,7 +326,10 @@ def landing():
 
 <nav>
   <div class="nav-logo">TASK<span>FLOW</span></div>
-  <a href="#login" class="nav-cta">Sign in</a>
+  <div class="nav-actions">
+    <a href="#signup" class="nav-cta secondary">Sign up</a>
+    <a href="#signin" class="nav-cta">Sign in</a>
+  </div>
 </nav>
 
 <!-- HERO -->
@@ -328,7 +339,7 @@ def landing():
     <h1>Stop managing tasks.<br>Start <em>owning</em> your time.</h1>
     <p class="hero-sub">Track priorities, deadlines, and progress — all in one clean workspace built for people who take their work seriously.</p>
     <div class="hero-actions">
-      <a href="#login" class="btn-primary">Open dashboard</a>
+      <a href="#signup" class="btn-primary">Get started free</a>
       <a href="#features" class="btn-ghost">See what's inside</a>
     </div>
   </div>
@@ -357,92 +368,105 @@ def landing():
   </div>
 </section>
 
-<!-- LOGIN -->
-<section class="login-section" id="login">
-  <div class="login-card">
-    <h2>Welcome back</h2>
-    <p>Sign in to access your personal dashboard.</p>
-    <form method="POST" action="/login">
+<!-- SIGNUP SECTION -->
+<section class="auth-section" id="signup">
+  <div class="auth-card">
+    <h2>Create account</h2>
+    <p>Join thousands managing their time better.</p>
+    <form method="POST" action="/register">
       <div class="field">
         <label>Username</label>
-        <input type="text" name="username" placeholder="Enter username" autofocus required autocomplete="username" />
+        <input type="text" name="username" placeholder="Choose a username" autofocus required />
       </div>
       <div class="field">
         <label>Password</label>
-        <input type="password" name="password" placeholder="Enter password" required autocomplete="current-password" />
+        <input type="password" name="password" placeholder="At least 3 characters" required />
       </div>
-      <button type="submit" class="login-btn">Access dashboard →</button>
+      <button type="submit" class="auth-btn">Create account →</button>
     </form>
+    <div class="toggle-auth">
+      Already have an account? <a href="#signin">Sign in</a>
+    </div>
+  </div>
+</section>
+
+<!-- SIGNIN SECTION -->
+<section class="auth-section" id="signin">
+  <div class="auth-card">
+    <h2>Welcome back</h2>
+    <p>Access your dashboard and tasks.</p>
+    <form method="POST" action="/login">
+      <div class="field">
+        <label>Username</label>
+        <input type="text" name="username" placeholder="Your username" autofocus required />
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input type="password" name="password" placeholder="Your password" required />
+      </div>
+      <button type="submit" class="auth-btn">Sign in →</button>
+    </form>
+    <div class="toggle-auth">
+      Don't have an account? <a href="#signup">Sign up</a>
+    </div>
   </div>
 </section>
 
 <footer>
   <div class="footer-logo">TASK<span>FLOW</span></div>
-  <div>Built with FastAPI · Deployed on Railway</div>
+  <div>Built with FastAPI · Zero clutter · Maximum focus</div>
 </footer>
 
 </body>
 </html>"""
 
 
-@app.get("/login-error", response_class=HTMLResponse)
-def login_error():
-    return """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Taskflow — Sign in</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@400;700&display=swap" rel="stylesheet">
-<style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'Inter',sans-serif;background:#0a0a0a;color:#fafaf9;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-  .card{background:#1c1c1e;border:1px solid rgba(255,255,255,0.06);border-radius:20px;padding:52px 48px;width:100%;max-width:420px}
-  h2{font-family:'Playfair Display',serif;font-size:28px;font-weight:700;margin-bottom:8px}
-  p{font-size:14px;color:#aeaeb2;margin-bottom:28px}
-  .error{background:rgba(230,57,70,0.12);border:1px solid rgba(230,57,70,0.3);border-radius:8px;padding:12px 16px;color:#ff6b78;font-size:13px;margin-bottom:20px}
-  label{display:block;font-size:12px;font-weight:600;letter-spacing:.4px;color:#aeaeb2;margin-bottom:8px;text-transform:uppercase}
-  input{width:100%;padding:13px 16px;background:#2c2c2e;border:1px solid rgba(255,255,255,0.08);border-radius:10px;color:#fafaf9;font-size:15px;font-family:'Inter',sans-serif;outline:none}
-  input:focus{border-color:#e63946}
-  button{width:100%;padding:14px;background:#e63946;border:none;border-radius:10px;color:white;font-size:15px;font-weight:600;cursor:pointer;margin-top:16px}
-  button:hover{background:#c1121f}
-  .back{display:block;text-align:center;margin-top:16px;color:#aeaeb2;font-size:13px;text-decoration:none}
-  .back:hover{color:#fafaf9}
-</style>
-</head>
-<body>
-<div class="card">
-  <h2>Incorrect credentials</h2>
-  <p>Username or password didn't match. Please try again.</p>
-  <div class="error">⚠️ Invalid username or password</div>
-  <form method="POST" action="/login">
-    <label>Username</label>
-    <input type="text" name="username" placeholder="Enter username" autofocus required autocomplete="username" style="margin-bottom:12px" />
-    <label>Password</label>
-    <input type="password" name="password" placeholder="Enter password" required autocomplete="current-password" />
-    <button type="submit">Try again →</button>
-  </form>
-  <a href="/" class="back">← Back to home</a>
-</div>
-</body>
-</html>"""
-
-
 # ─── Auth Routes ──────────────────────────────────────────────────────────────
+@app.post("/register")
+def register(username: str = Form(...), password: str = Form(...)):
+    """Create a new user account"""
+    # Validate input
+    valid, error = validate_credentials(username, password)
+    if not valid:
+        return RedirectResponse(f"/?error={error}", status_code=302)
+    
+    # Check if username already exists
+    if username_exists(username):
+        return RedirectResponse("/?error=Username%20already%20taken", status_code=302)
+    
+    # Register new user
+    registered_users[username.lower()] = hash_password(password)
+    
+    # Create session
+    token = secrets.token_hex(32)
+    sessions[token] = username.lower()
+    
+    # Redirect to dashboard with session cookie
+    resp = RedirectResponse("/dashboard", status_code=302)
+    resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
+    return resp
+
+
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
-    if check_credentials(username, password):
-        token = secrets.token_hex(32)
-        sessions[token] = username.lower()
-        resp = RedirectResponse("/dashboard", status_code=302)
-        resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
-        return resp
-    return RedirectResponse("/login-error", status_code=302)
+    """Login with existing credentials"""
+    # Check if user exists and password is correct
+    if not username_exists(username) or not check_password(username, password):
+        return RedirectResponse("/?error=Invalid%20username%20or%20password", status_code=302)
+    
+    # Create session
+    token = secrets.token_hex(32)
+    sessions[token] = username.lower()
+    
+    # Redirect to dashboard with session cookie
+    resp = RedirectResponse("/dashboard", status_code=302)
+    resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
+    return resp
 
 
 @app.get("/logout")
 def logout(session: Optional[str] = Cookie(default=None)):
+    """Logout and destroy session"""
     if session and session in sessions:
         del sessions[session]
     resp = RedirectResponse("/", status_code=302)
@@ -453,6 +477,7 @@ def logout(session: Optional[str] = Cookie(default=None)):
 # ─── Dashboard ────────────────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(session: Optional[str] = Cookie(default=None)):
+    """Main dashboard view"""
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
@@ -463,6 +488,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
     pending = total - completed
     progress = int((completed / total * 100) if total else 0)
 
+    # Determine progress ring color
     if progress == 0:
         ring_color = "#6b7280"
     elif progress < 33:
@@ -472,6 +498,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
     else:
         ring_color = "#10b981"
 
+    # Render tasks
     tasks_html = ""
     for t in tasks:
         try:
@@ -480,6 +507,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
         except:
             days_left = 0
 
+        # Determine status
         if t["completed"]:
             status = "Completed"
             status_class = "completed"
@@ -497,12 +525,14 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
             status = f"{days_left} days left"
             status_class = "normal"
 
+        # Priority colors
         priority = t["priority"].lower()
         priority_colors = {"high": "#dc2626", "medium": "#f59e0b", "low": "#10b981"}
         priority_bg = {"high": "#fee2e2", "medium": "#fef3c7", "low": "#ecfdf5"}
         color = priority_colors.get(priority, "#666")
         bg = priority_bg.get(priority, "white")
 
+        # Escape HTML in strings
         title_esc = t["title"].replace('"', '&quot;').replace("'", "&#39;")
         cat_esc = t["category"].replace('"', '&quot;').replace("'", "&#39;")
 
@@ -534,7 +564,6 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   *, *::before, *::after {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ font-family:'Inter',sans-serif; background:#f5f4f2; color:#1a1a1a; }}
 
-  /* NAV */
   .topbar {{
     position:fixed; top:0; left:0; right:0; z-index:100;
     background:#0a0a0a; padding:0 32px;
@@ -544,7 +573,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   .topbar-logo {{ font-weight:700; font-size:16px; color:#fafaf9; }}
   .topbar-logo span {{ color:#e63946; }}
   .topbar-right {{ display:flex; align-items:center; gap:16px; }}
-  .topbar-date {{ font-size:13px; color:#6b7280; }}
+  .topbar-info {{ font-size:13px; color:#6b7280; }}
   .logout {{
     padding:7px 16px; border-radius:7px;
     border:1px solid rgba(255,255,255,0.12); color:#aeaeb2;
@@ -553,10 +582,8 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   }}
   .logout:hover {{ border-color:rgba(255,255,255,0.3); color:#fafaf9; }}
 
-  /* LAYOUT */
   .page {{ max-width:1200px; margin:0 auto; padding:80px 32px 60px; display:grid; grid-template-columns:1fr 280px; gap:40px; }}
 
-  /* HEADER */
   .page-header {{ grid-column:1; margin-bottom:8px; }}
   .page-header h1 {{
     font-family:'Playfair Display',serif;
@@ -565,7 +592,6 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   }}
   .page-header p {{ font-size:14px; color:#6b7280; }}
 
-  /* FORM */
   .form-card {{
     grid-column:1; background:white; padding:28px 32px;
     border-radius:14px; margin-bottom:32px;
@@ -592,7 +618,6 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   }}
   .btn-add:hover {{ opacity:0.85; }}
 
-  /* TASKS */
   .tasks-list {{ grid-column:1; display:flex; flex-direction:column; gap:10px; }}
   .tasks-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; }}
   .tasks-header h2 {{ font-size:15px; font-weight:600; }}
@@ -646,7 +671,6 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   .empty-state h3 {{ font-size:16px; font-weight:600; margin-bottom:8px; }}
   .empty-state p {{ font-size:13px; color:#6b7280; }}
 
-  /* SIDEBAR */
   .sidebar {{ position:sticky; top:72px; height:fit-content; display:flex; flex-direction:column; gap:14px; }}
   .stat-card {{
     background:white; padding:20px 24px; border-radius:14px;
@@ -668,7 +692,6 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   }}
   .progress-pct {{ font-size:22px; font-weight:300; color:{ring_color}; }}
 
-  /* MODAL */
   .modal {{
     display:none; position:fixed; inset:0;
     background:rgba(0,0,0,0.4); z-index:999;
@@ -688,7 +711,6 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   .cancel-btn {{ background:#f3f4f6; color:#374151; }}
   .save-btn {{ background:#0a0a0a; color:white; }}
 
-  /* RESPONSIVE */
   @media(max-width:900px) {{
     .page {{ grid-template-columns:1fr; }}
     .sidebar {{ display:grid; grid-template-columns:repeat(4,1fr); position:static; }}
@@ -702,14 +724,13 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 <div class="topbar">
   <div class="topbar-logo">TASK<span>FLOW</span></div>
   <div class="topbar-right">
-    <span class="topbar-date">👤 {username}</span>
-    <span class="topbar-date">{date.today().strftime('%B %d, %Y')}</span>
+    <span class="topbar-info">👤 {username}</span>
+    <span class="topbar-info">{date.today().strftime('%b %d, %Y')}</span>
     <a href="/logout" class="logout">Sign out</a>
   </div>
 </div>
 
 <div class="page">
-
   <div>
     <div class="page-header">
       <h1>Hey, {username.capitalize()} 👋</h1>
@@ -741,7 +762,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
             </select>
           </div>
           <div class="form-full">
-            <button type="submit" class="btn-add">Add task</button>
+            <button type="submit" class="btn-add">Add task →</button>
           </div>
         </div>
       </form>
@@ -756,7 +777,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
       {tasks_html if tasks_html else '''<div class="empty-state">
         <div class="empty-icon">✅</div>
         <h3>No tasks yet</h3>
-        <p>Create your first task using the form above.</p>
+        <p>Create your first task using the form above and start tracking your time.</p>
       </div>'''}
     </div>
   </div>
@@ -785,10 +806,8 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
       <div class="progress-pct">{progress}%</div>
     </div>
   </div>
-
 </div>
 
-<!-- EDIT MODAL -->
 <div id="editModal" class="modal">
   <div class="modal-box">
     <h2>Edit task</h2>
@@ -836,27 +855,30 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 </html>"""
 
 
-# ─── Task Routes (auth-gated) ──────────────────────────────────────────────────
-def auth_redirect(session):
-    if not is_authenticated(session):
-        return RedirectResponse("/", status_code=302)
-    return None
-
-
+# ─── Task Routes ──────────────────────────────────────────────────────────────
 @app.post("/task/add")
 def task_add(
     session: Optional[str] = Cookie(default=None),
-    title: str = Form(...), category: str = Form(...),
-    priority: str = Form(...), task_type: str = Form(...), due_date: str = Form(...),
+    title: str = Form(...),
+    category: str = Form(...),
+    priority: str = Form(...),
+    task_type: str = Form(...),
+    due_date: str = Form(...),
 ):
+    """Add a new task"""
     global next_task_id
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
+    
     get_tasks(username).append({
-        "id": next_task_id, "title": title, "category": category,
-        "priority": priority, "due_date": due_date,
-        "task_type": task_type, "completed": False,
+        "id": next_task_id,
+        "title": title,
+        "category": category,
+        "priority": priority,
+        "due_date": due_date,
+        "task_type": task_type,
+        "completed": False,
     })
     next_task_id += 1
     return RedirectResponse("/dashboard", status_code=302)
@@ -864,13 +886,16 @@ def task_add(
 
 @app.get("/task/complete/{task_id}")
 def task_complete(task_id: int, session: Optional[str] = Cookie(default=None)):
+    """Toggle task completion"""
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
+    
     for t in get_tasks(username):
         if t["id"] == task_id:
             t["completed"] = not t["completed"]
             break
+    
     return RedirectResponse("/dashboard", status_code=302)
 
 
@@ -878,24 +903,37 @@ def task_complete(task_id: int, session: Optional[str] = Cookie(default=None)):
 def task_edit(
     task_id: int,
     session: Optional[str] = Cookie(default=None),
-    title: str = Form(...), category: str = Form(...),
-    priority: str = Form(...), due_date: str = Form(...), task_type: str = Form(...),
+    title: str = Form(...),
+    category: str = Form(...),
+    priority: str = Form(...),
+    due_date: str = Form(...),
+    task_type: str = Form(...),
 ):
+    """Edit an existing task"""
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
+    
     for t in get_tasks(username):
         if t["id"] == task_id:
-            t.update(title=title, category=category, priority=priority,
-                     due_date=due_date, task_type=task_type)
+            t.update(
+                title=title,
+                category=category,
+                priority=priority,
+                due_date=due_date,
+                task_type=task_type
+            )
             break
+    
     return RedirectResponse("/dashboard", status_code=302)
 
 
 @app.get("/task/delete/{task_id}")
 def task_delete(task_id: int, session: Optional[str] = Cookie(default=None)):
+    """Delete a task"""
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
+    
     user_tasks[username] = [t for t in get_tasks(username) if t["id"] != task_id]
     return RedirectResponse("/dashboard", status_code=302)
