@@ -3,7 +3,7 @@ import pytest
 from datetime import date, timedelta
 from fastapi.testclient import TestClient
 
-from claude import (
+from main import (
     app, registered_users, sessions, user_tasks,
     hash_password, get_current_user, is_authenticated,
     username_exists, validate_credentials, check_password,
