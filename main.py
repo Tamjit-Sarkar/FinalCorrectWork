@@ -406,7 +406,7 @@ def landing():
 
 <footer>
   <div class="footer-logo">TASK<span>FLOW</span></div>
-  <div>Built with FastAPI · Zero clutter · Maximum focus</div>
+  <div>Built with FastAPI · Tamjit · Maximum focus</div>
 </footer>
 
 </body>
