@@ -8,6 +8,7 @@ import secrets
 from datetime import date, datetime
 from typing import Optional
 from itertools import count
+from abc import ABC, abstractmethod
 
 from fastapi import Cookie, FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
