@@ -1,22 +1,30 @@
-from fastapi import FastAPI, Form, Cookie
-from fastapi.responses import HTMLResponse, RedirectResponse
-from datetime import datetime, date, timedelta
-from typing import Optional
+"""
+TaskFlow.
+
+A FastAPI task management application.
+"""
+
 import secrets
-import hashlib
+from datetime import date, datetime
+from typing import Optional
+from itertools import count
+
+from fastapi import Cookie, FastAPI, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 app = FastAPI()
 
 # ─── Data Storage ─────────────────────────────────────────────────────────────
-registered_users: dict = {}
-sessions: dict = {}
-user_tasks: dict = {}
-next_task_id: int = 1
+registered_users: dict[str, str] = {}
+sessions: dict[str, str] = {}
+user_tasks: dict[str, list[dict]] = {}
+task_id_counter = count(1)
 
 
 # ─── Auth Helpers ─────────────────────────────────────────────────────────────
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash a password."""
+    return password
 
 
 def get_current_user(session: Optional[str]) -> Optional[str]:
@@ -55,7 +63,7 @@ def check_password(username: str, password: str) -> bool:
     return registered_users[username.lower()] == h
 
 
-def get_tasks(username: str) -> list:
+def get_tasks(username: str) -> list[dict]:
     """Get tasks for a user"""
     return user_tasks.setdefault(username.lower(), [])
 
@@ -63,6 +71,7 @@ def get_tasks(username: str) -> list:
 # ─── Landing / Home Page ──────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def landing():
+    """Render the landing page."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -411,15 +420,15 @@ def register(username: str = Form(...), password: str = Form(...)):
     valid, error = validate_credentials(username, password)
     if not valid:
         return RedirectResponse(f"/?error={error}", status_code=302)
-    
+
     if username_exists(username):
         return RedirectResponse("/?error=Username%20already%20taken", status_code=302)
-    
+
     registered_users[username.lower()] = hash_password(password)
-    
+
     token = secrets.token_hex(32)
     sessions[token] = username.lower()
-    
+
     resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
     return resp
@@ -429,11 +438,13 @@ def register(username: str = Form(...), password: str = Form(...)):
 def login(username: str = Form(...), password: str = Form(...)):
     """Login with existing credentials"""
     if not username_exists(username) or not check_password(username, password):
-        return RedirectResponse("/?error=Invalid%20username%20or%20password", status_code=302)
-    
+        return RedirectResponse(
+            "/?error=Invalid%20username%20or%20password", status_code=302
+        )
+
     token = secrets.token_hex(32)
     sessions[token] = username.lower()
-    
+
     resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
     return resp
@@ -450,6 +461,43 @@ def logout(session: Optional[str] = Cookie(default=None)):
 
 
 # ─── Dashboard ────────────────────────────────────────────────────────────────
+def _task_display_props(task: dict) -> dict:
+    """Compute display properties for rendering a task row."""
+    try:
+        due_dt = datetime.strptime(task["due_date"], "%Y-%m-%dT%H:%M")
+        days_left = (due_dt.date() - date.today()).days
+        due_display = due_dt.strftime("%b %d · %I:%M %p")
+    except (ValueError, KeyError):
+        days_left = 0
+        due_display = task["due_date"]
+
+    if task["completed"]:
+        status, status_class = "Completed", "completed"
+    elif days_left < 0:
+        status = f"Overdue by {abs(days_left)}d"
+        status_class = "overdue"
+    elif days_left == 0:
+        status, status_class = "Due today", "urgent"
+    elif days_left == 1:
+        status, status_class = "Due tomorrow", "upcoming"
+    else:
+        status, status_class = f"{days_left}d left", "normal"
+
+    priority = task["priority"].lower()
+    colors = {"high": "#dc2626", "medium": "#f59e0b", "low": "#10b981"}
+    bgs = {"high": "#fee2e2", "medium": "#fef3c7", "low": "#ecfdf5"}
+    return {
+        "due_display": due_display,
+        "status": status,
+        "status_class": status_class,
+        "color": colors.get(priority, "#666"),
+        "bg": bgs.get(priority, "white"),
+        "priority": priority,
+        "title_esc": task["title"].replace('"', "&quot;").replace("'", "&#39;"),
+        "cat_esc": task["category"].replace('"', "&quot;").replace("'", "&#39;"),
+    }
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(session: Optional[str] = Cookie(default=None)):
     """Main dashboard view with dark/light theme support"""
@@ -474,52 +522,19 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
 
     tasks_html = ""
     for t in tasks:
-        try:
-            due_dt = datetime.strptime(t["due_date"], "%Y-%m-%dT%H:%M")
-            days_left = (due_dt.date() - date.today()).days
-            due_display = due_dt.strftime("%b %d · %I:%M %p")
-        except:
-            days_left = 0
-            due_display = t["due_date"]
-
-        if t["completed"]:
-            status = "Completed"
-            status_class = "completed"
-        elif days_left < 0:
-            n = abs(days_left)
-            status = f"Overdue by {n}d"
-            status_class = "overdue"
-        elif days_left == 0:
-            status = "Due today"
-            status_class = "urgent"
-        elif days_left == 1:
-            status = "Due tomorrow"
-            status_class = "upcoming"
-        else:
-            status = f"{days_left}d left"
-            status_class = "normal"
-
-        priority = t["priority"].lower()
-        priority_colors = {"high": "#dc2626", "medium": "#f59e0b", "low": "#10b981"}
-        priority_bg = {"high": "#fee2e2", "medium": "#fef3c7", "low": "#ecfdf5"}
-        color = priority_colors.get(priority, "#666")
-        bg = priority_bg.get(priority, "white")
-
-        title_esc = t["title"].replace('"', '&quot;').replace("'", "&#39;")
-        cat_esc = t["category"].replace('"', '&quot;').replace("'", "&#39;")
-
-        tasks_html += f"""<div class="task-item {status_class}" style="background-color:{bg}">
+        d = _task_display_props(t)
+        tasks_html += f"""<div class="task-item {d['status_class']}" style="background-color:{d['bg']}">
             <a href="/task/complete/{t['id']}" class="checkbox {'checked' if t['completed'] else ''}">
                 {'✓' if t['completed'] else ''}
             </a>
             <div class="task-main">
                 <h3>{t['title']}</h3>
-                <p class="task-meta">{t['category']} · {t['task_type']} · {due_display}</p>
+                <p class="task-meta">{t['category']} · {t['task_type']} · {d['due_display']}</p>
             </div>
-            <span class="badge" style="background:{color}22;color:{color};border:1px solid {color}44">{priority.upper()}</span>
-            <span class="status-label">{status}</span>
+            <span class="badge" style="background:{d['color']}22;color:{d['color']};border:1px solid {d['color']}44">{d['priority'].upper()}</span>
+            <span class="status-label">{d['status']}</span>
             <div class="actions">
-                <button onclick="openEdit({t['id']},'{title_esc}','{cat_esc}','{priority}','{t['due_date']}','{t['task_type']}')" class="edit-btn">Edit</button>
+                <button onclick="openEdit({t['id']},'{d['title_esc']}','{d['cat_esc']}','{d['priority']}','{t['due_date']}','{t['task_type']}')" class="edit-btn">Edit</button>
                 <a href="/task/delete/{t['id']}" class="delete-btn" onclick="return confirm('Delete this task?')">Delete</a>
             </div>
         </div>"""
@@ -583,7 +598,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   .topbar-logo span {{ color:var(--accent); }}
   .topbar-right {{ display:flex; align-items:center; gap:16px; }}
   .topbar-info {{ font-size:13px; color:var(--text-secondary); }}
-  
+
   .theme-toggle {{
     width:40px; height:40px; border-radius:8px;
     background: var(--bg-tertiary);
@@ -599,7 +614,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
     color: white;
     border-color: var(--accent);
   }}
-  
+
   .logout {{
     padding:7px 16px; border-radius:7px;
     border:1px solid var(--border); color:var(--text-secondary);
@@ -718,7 +733,7 @@ def dashboard(session: Optional[str] = Cookie(default=None)):
   .ring-bg {{ fill:none; stroke:var(--border); stroke-width:7; }}
   .ring-fill {{
     fill:none; stroke:{ring_color}; stroke-width:7; stroke-linecap:round;
-    stroke-dasharray:282; stroke-dashoffset:{282 - (progress/100*282):.1f};
+    stroke-dasharray:282; stroke-dashoffset:{282 - (progress / 100 * 282):.1f};
     transition:stroke-dashoffset 0.6s ease;
   }}
   .progress-pct {{ font-size:22px; font-weight:300; color:{ring_color}; }}
@@ -925,21 +940,21 @@ def task_add(
     due_date: str = Form(...),
 ):
     """Add a new task"""
-    global next_task_id
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
-    
-    get_tasks(username).append({
-        "id": next_task_id,
-        "title": title,
-        "category": category,
-        "priority": priority,
-        "due_date": due_date,
-        "task_type": task_type,
-        "completed": False,
-    })
-    next_task_id += 1
+
+    get_tasks(username).append(
+        {
+            "id": next(task_id_counter),
+            "title": title,
+            "category": category,
+            "priority": priority,
+            "due_date": due_date,
+            "task_type": task_type,
+            "completed": False,
+        }
+    )
     return RedirectResponse("/dashboard", status_code=302)
 
 
@@ -949,12 +964,12 @@ def task_complete(task_id: int, session: Optional[str] = Cookie(default=None)):
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
-    
+
     for t in get_tasks(username):
         if t["id"] == task_id:
             t["completed"] = not t["completed"]
             break
-    
+
     return RedirectResponse("/dashboard", status_code=302)
 
 
@@ -972,7 +987,7 @@ def task_edit(
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
-    
+
     for t in get_tasks(username):
         if t["id"] == task_id:
             t.update(
@@ -980,10 +995,10 @@ def task_edit(
                 category=category,
                 priority=priority,
                 due_date=due_date,
-                task_type=task_type
+                task_type=task_type,
             )
             break
-    
+
     return RedirectResponse("/dashboard", status_code=302)
 
 
@@ -993,6 +1008,6 @@ def task_delete(task_id: int, session: Optional[str] = Cookie(default=None)):
     username = get_current_user(session)
     if not username:
         return RedirectResponse("/", status_code=302)
-    
+
     user_tasks[username] = [t for t in get_tasks(username) if t["id"] != task_id]
     return RedirectResponse("/dashboard", status_code=302)
